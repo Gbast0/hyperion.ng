@@ -1,6 +1,7 @@
-name: Build and Upload Artifacts
+name: GitHub Qt5/6 Builds
 
 on:
+  workflow_call:
   push:
     branches:
       - main
