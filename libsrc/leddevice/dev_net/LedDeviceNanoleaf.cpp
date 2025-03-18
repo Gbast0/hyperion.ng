@@ -1,4 +1,4 @@
-// Local-Hyperion includes
+// Local-Hyperion includes.
 #include "LedDeviceNanoleaf.h"
 
 //std includes
