@@ -1,76 +1,199 @@
 name: GitHub Qt5/6 Builds
 
 on:
+  # Reusable from push_pull.yml
   workflow_call:
-  push:
-    branches:
-      - main
-  pull_request:
+    inputs:
+      qt_version:
+        type: string
+        description: Build with this Qt version
+        default: '5'
+        required: false
+      event_name:
+        type: string
+        description: The event name
+        default: ''
+        required: false
+      pull_request_number:
+        type: string
+        description: The corresponding PR number
+        default: ''
+        required: false
+      publish:
+        type: boolean
+        description: Package publishing
+        default: false
+        required: false
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-20.04
-    container:
-      image: debian:bullseye
+
+######################
+###### Linux #########
+######################
+
+  Linux:
+    name: 🐧 ${{ matrix.os.description }}
+    runs-on: ${{ matrix.os.architecture[0] == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [
+          { distribution: debian, codename: bullseye, description: Debian Bullseye (x86_64),                      architecture: [ amd64, linux/amd64  ], platform: x11 },
+        ]
+        target_lookup: [{ 'arm64': 'arm64', 'armv6': 'armv6l', 'armv7': 'armv7l' }]
+        isQt5:
+          - ${{ inputs.qt_version == '5' }}
+        exclude:
+          - isQt5: true
+            os: { distribution: debian, codename: bullseye }
+          - isQt5: false
+            os: { distribution: debian, codename: buster }
+
     steps:
-      - name: Install dependencies
+      - name: ⬇ Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 🔧 Append PR number to version (PR  only)
+        if: ${{ inputs.event_name == 'pull_request' }}
+        shell: bash
+        run: tr -d '\n' < .version > temp && mv temp .version && echo -n "+PR${{ inputs.pull_request_number }}" >> .version
+
+      - name: 👷 Build
+        shell: bash
         run: |
-          apt-get update && apt-get install -y \
-          build-essential cmake qt6-base-dev
+          mkdir deploy
+          docker run --rm --platform=${{ matrix.os.architecture[1] }} ${{ env.ENTRYPOINT }} \
+            -v "${{ github.workspace }}/deploy:/deploy" \
+            -v "${{ github.workspace }}:/source:rw" \
+            -w "/source" \
+            ghcr.io/hyperion-project/${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} \
+            /bin/bash -c "cmake --preset linux-${{ env.BUILD_TYPE }} -DPLATFORM=${{ matrix.os.platform }} ${{ env.CPACK_SYSTEM_PROCESSOR }} &&
+            cmake --build --preset linux-${{ env.BUILD_TYPE }} --target package --parallel $(nproc) &&
+            cp /source/build/Hyperion-* /deploy/ 2>/dev/null"
+        env:
+          DOCKER_IMAGE: ${{ matrix.os.distribution }}
+          DOCKER_TAG: ${{ matrix.os.codename }}${{ inputs.qt_version == '6' && '-qt6' || '' }}
+          BUILD_TYPE: ${{ inputs.event_name == 'pull_request' && 'debug' || 'release' }}
+          ENTRYPOINT: ${{ matrix.os.architecture[0] != 'amd64' && '--entrypoint /usr/bin/env' || '' }}
+          CPACK_SYSTEM_PROCESSOR: ${{ matrix.os.architecture[0] != 'amd64' && format('-DCPACK_SYSTEM_PROCESSOR={0}', matrix.target_lookup[format('{0}', matrix.os.architecture[0])]) || '' }}
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Configure build
-        run: cmake -B build -DQT_VERSION=6
-
-      - name: Compile
-        run: cmake --build build --parallel
-
-      - name: Upload Linux artifact
+      - name: 📦 Upload
+        if: ${{ inputs.publish || inputs.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
-          name: linux-build
-          path: build/*
+          name: ${{ inputs.event_name == 'pull_request' && env.NAME || format('artifact-{0}', env.NAME) }}
+          path: ${{ inputs.event_name == 'pull_request' && 'deploy/*.tar.gz' || 'deploy/Hyperion-*' }}
+        env:
+          NAME: ${{ format('{0}_{1}_{2}{3}', matrix.os.distribution, matrix.os.codename, matrix.os.architecture[0], inputs.qt_version == '6' && '_qt6' || '') }}
 
-  build-windows:
-    runs-on: windows-latest
+######################
+###### Windows #######
+######################
+
+  windows:
+    name: 🪟 Windows x64
+    runs-on: windows-2022
+    env:
+      LIBJPEG_TURBO_VERSION: 3.0.1
     steps:
-      - name: Checkout repository
+      - name: ⬇ Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install dependencies
-        run: choco install cmake qt5-default
+      - name: 🔧 Append Pull Request number to version (PR  only)
+        if: ${{ inputs.event_name == 'pull_request' }}
+        shell: bash
+        run: tr -d '\n' < .version > temp && mv temp .version && echo -n "+PR${{ inputs.pull_request_number }}" >> .version
 
-      - name: Configure build
-        run: cmake -B build -DQT_VERSION=5
+      - name: 💾 Restore DirectX SDK (if available)
+        uses: ethanjli/cached-download-action@v0.1.2
+        with:
+          url: https://download.microsoft.com/download/A/E/7/AE743F1F-632B-4809-87A9-AA1BB3458E31/DXSDK_Jun10.exe
+          destination: .\installer\dxsdk-jun10.exe
+          cache-key: dxsdk-jun10
 
-      - name: Compile
-        run: cmake --build build --parallel
+      - name: 💾 Restore libjpeg-turbo (if available)
+        uses: ethanjli/cached-download-action@v0.1.2
+        with:
+          url: https://sourceforge.net/projects/libjpeg-turbo/files/${{ env.LIBJPEG_TURBO_VERSION }}/libjpeg-turbo-${{ env.LIBJPEG_TURBO_VERSION }}-vc64.exe
+          destination: .\installer\libjpeg-turbo.exe
+          cache-key: libjpeg-turbo
 
-      - name: Upload Windows artifact
+      - name: 📥 Install DirectX SDK & libjpeg-turbo
+        run: |
+          cmd.exe /c start /wait .\installer\libjpeg-turbo.exe /S
+          cmd.exe /c start /wait .\installer\dxsdk-jun10.exe /U /F
+
+      - name: 📥 Install Vulkan SDK
+        if: ${{ inputs.qt_version == '6' }}
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: 📥 Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ inputs.qt_version == '6' && '6.8' || '5.15.*' }}
+          target: 'desktop'
+          modules: ${{ inputs.qt_version == '6' && 'qtserialport qtwebsockets' || '' }}
+          cache: 'true'
+          cache-key-prefix: 'cache-qt-windows'
+
+      - name: 🛠️ Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 👷 Build
+        shell: cmd
+        run: |
+           cmake --preset windows-${{ env.BUILD_TYPE }}
+           cmake --build --preset windows-${{ env.BUILD_TYPE }} --target package --parallel %NUMBER_OF_PROCESSORS%
+        env:
+          BUILD_TYPE: ${{ inputs.event_name == 'pull_request' && 'debug' || 'release' }}
+
+      - name: 📦 Upload
+        if: ${{ inputs.publish || inputs.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build
-          path: build/*
+          name: ${{ inputs.event_name == 'pull_request' && env.NAME || format('artifact-{0}', env.NAME) }}
+          path: ${{ inputs.event_name == 'pull_request' && 'build/*.exe' || 'build/Hyperion-*' }}
+        env:
+          NAME: ${{ inputs.qt_version == '6' && 'windows_x64_qt6' || 'windows_x64' }}
 
-  push-artifacts:
-    needs: [build-linux, build-windows]
+#####################################
+###### Publish GitHub Releases ######
+#####################################
+
+  github_publish:
+    name: 🚀 Publish GitHub Releases
+    if: ${{ inputs.qt_version == '5' && inputs.publish }}
+    needs: [Linux, macOS, windows]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: ⬇ Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Commit and push artifacts
+      - name: 🔧 Prepare
         run: |
-          git config --global user.name 'github-actions'
-          git config --global user.email 'actions@github.com'
-          git checkout -b built-artifacts
-          git add .
-          git commit -m 'Add built artifacts'
-          git push origin built-artifacts
+          echo "TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+          echo "VERSION=$(tr -d '\n' < .version)" >> $GITHUB_ENV
+
+      - name: 💾 Artifact download
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifact-*
+          path: all-artifacts
+
+      - name: 📦 Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Hyperion ${{ env.VERSION }}
+          tag_name: ${{ env.TAG }}
+          files: "all-artifacts/**"
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
