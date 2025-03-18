@@ -57,3 +57,33 @@ jobs:
           git add build_artifacts/
           git commit -m "🚀 New build artifacts - $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin build-artifacts --force
+
+  github_publish:
+    name: 🚀 Publish GitHub Releases
+    if: ${{ inputs.qt_version == '5' && inputs.publish }}
+    needs: [github_build, save_artifacts_to_repo]
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇ Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 Prepare
+        run: |
+          echo "TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+          echo "VERSION=$(tr -d '\n' < .version)" >> $GITHUB_ENV
+
+      - name: 💾 Artifact download
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifact-*
+          path: all-artifacts
+
+      - name: 📦 Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Hyperion ${{ env.VERSION }}
+          tag_name: ${{ env.TAG }}
+          files: "all-artifacts/**"
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
