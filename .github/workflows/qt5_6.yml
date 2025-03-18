@@ -32,7 +32,7 @@ jobs:
 
   Linux:
     name: 🐧 ${{ matrix.os.description }}
-    runs-on: ${{ matrix.os.architecture[0] == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +92,7 @@ jobs:
 
   windows:
     name: 🪟 Windows x64
-    runs-on: windows-2022
+    runs-on: self-hosted
     if: ${{ inputs.qt_version == '5' }}
     env:
       LIBJPEG_TURBO_VERSION: 3.0.1
