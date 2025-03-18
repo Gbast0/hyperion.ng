@@ -171,7 +171,7 @@ jobs:
   github_publish:
     name: 🚀 Publish GitHub Releases
     if: ${{ inputs.qt_version == '5' && inputs.publish }}
-    needs: [Linux, macOS, windows]
+    needs: [Linux, windows]
     runs-on: ubuntu-latest
     steps:
       - name: ⬇ Checkout
