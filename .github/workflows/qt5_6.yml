@@ -7,17 +7,17 @@ on:
       qt_version:
         type: string
         description: Build with this Qt version
-        default: '5'
+        default: "5"
         required: false
       event_name:
         type: string
         description: The event name
-        default: ''
+        default: ""
         required: false
       pull_request_number:
         type: string
         description: The corresponding PR number
-        default: ''
+        default: ""
         required: false
       publish:
         type: boolean
@@ -26,10 +26,9 @@ on:
         required: false
 
 jobs:
-
-######################
-###### Linux #########
-######################
+  ######################
+  ###### Linux #########
+  ######################
 
   Linux:
     name: 🐧 ${{ matrix.os.description }}
@@ -37,10 +36,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [
-          { distribution: debian, codename: bullseye, description: Debian Bullseye (x86_64), architecture: [ amd64, linux/amd64 ], platform: x11 }
-        ]
-        qt_version: ['6']
+        os:
+          [
+            {
+              distribution: debian,
+              codename: bullseye,
+              description: Debian Bullseye (x86_64),
+              architecture: [amd64, linux/amd64],
+              platform: x11,
+            },
+          ]
+        qt_version: ["6"]
     steps:
       - name: ⬇ Checkout
         uses: actions/checkout@v4
@@ -80,9 +86,9 @@ jobs:
         env:
           NAME: ${{ format('{0}_{1}_{2}{3}', matrix.os.distribution, matrix.os.codename, matrix.os.architecture[0], inputs.qt_version == '6' && '_qt6' || '') }}
 
-######################
-###### Windows #######
-######################
+  ######################
+  ###### Windows #######
+  ######################
 
   windows:
     name: 🪟 Windows x64
@@ -132,10 +138,10 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ inputs.qt_version == '6' && '6.8' || '5.15.*' }}
-          target: 'desktop'
+          target: "desktop"
           modules: ${{ inputs.qt_version == '6' && 'qtserialport qtwebsockets' || '' }}
-          cache: 'true'
-          cache-key-prefix: 'cache-qt-windows'
+          cache: "true"
+          cache-key-prefix: "cache-qt-windows"
 
       - name: 🛠️ Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -143,8 +149,8 @@ jobs:
       - name: 👷 Build
         shell: cmd
         run: |
-           cmake --preset windows-${{ env.BUILD_TYPE }}
-           cmake --build --preset windows-${{ env.BUILD_TYPE }} --target package --parallel %NUMBER_OF_PROCESSORS%
+          cmake --preset windows-${{ env.BUILD_TYPE }}
+          cmake --build --preset windows-${{ env.BUILD_TYPE }} --target package --parallel %NUMBER_OF_PROCESSORS%
         env:
           BUILD_TYPE: ${{ inputs.event_name == 'pull_request' && 'debug' || 'release' }}
 
@@ -157,9 +163,9 @@ jobs:
         env:
           NAME: ${{ inputs.qt_version == '6' && 'windows_x64_qt6' || 'windows_x64' }}
 
-#####################################
-###### Publish GitHub Releases ######
-#####################################
+  #####################################
+  ###### Publish GitHub Releases ######
+  #####################################
 
   github_publish:
     name: 🚀 Publish GitHub Releases
@@ -190,3 +196,32 @@ jobs:
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  save_artifacts_to_repo:
+    name: 💾 Save Build to Repository
+    needs: [Linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for branch creation
+
+      - name: 🛠 Prepare Build Output
+        run: |
+          mkdir -p build_artifacts
+          cp -r deploy/* build_artifacts/ || echo "No files copied"
+          ls -lah build_artifacts/
+
+      - name: 📤 Commit & Push Build Files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Checkout or create the 'build-artifacts' branch
+          git checkout -B build-artifacts
+          
+          # Force add ignored files
+          git add -f build_artifacts/
+          git commit -m "🚀 New build artifacts - $(date +'%Y-%m-%d %H:%M:%S')"
+          git push origin build-artifacts --force
