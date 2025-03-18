@@ -93,6 +93,10 @@ namespace {
 
 	const double ROTATION_STEPS_DEGREE = 15.0;
 
+	// Nanoleaf Stripe API elements
+	const char API_LENGTH[] = "length";
+	const char LENGTH_NUMLEDS[] = "numLEDs";
+
 } //End of constants
 
 // Nanoleaf external control versions
@@ -218,187 +222,168 @@ bool LedDeviceNanoleaf::initLedsConfiguration()
 {
 	bool isInitOK = true;
 
-	//Get Nanoleaf device details and configuration
-
-	// Read Panel count and panel Ids
+	// Get Nanoleaf device details and configuration
 	_restApi->setPath(API_ROOT);
 	httpResponse response = _restApi->get();
+
 	if (response.error())
 	{
-		QString errorReason = QString("Getting device details failed with error: '%1'").arg(response.getErrorReason());
-		this->setInError(errorReason);
-		isInitOK = false;
+		this->setInError(QString("Getting device details failed with error: '%1'").arg(response.getErrorReason()));
+		return false;
+	}
+
+	QJsonObject jsonAllPanelInfo = response.getBody().object();
+
+	// Extract device details
+	QString deviceName = jsonAllPanelInfo[DEV_DATA_NAME].toString();
+	_deviceModel = jsonAllPanelInfo[DEV_DATA_MODEL].toString();
+	QString deviceManufacturer = jsonAllPanelInfo[DEV_DATA_MANUFACTURER].toString();
+	_deviceFirmwareVersion = jsonAllPanelInfo[DEV_DATA_FIRMWAREVERSION].toString();
+
+	Debug(_log, "Name           : %s", QSTRING_CSTR(deviceName));
+	Debug(_log, "Model          : %s", QSTRING_CSTR(_deviceModel));
+	Debug(_log, "Manufacturer   : %s", QSTRING_CSTR(deviceManufacturer));
+	Debug(_log, "FirmwareVersion: %s", QSTRING_CSTR(_deviceFirmwareVersion));
+
+	QJsonObject jsonPanelLayout;
+
+	// Check if the device is a Nanoleaf stripe
+	if (_deviceModel == "NL72K1" && jsonAllPanelInfo.contains(API_LENGTH))
+	{
+		QJsonObject lengthInfo = jsonAllPanelInfo[API_LENGTH].toObject();
+		int length = lengthInfo[LENGTH_NUMLEDS].toInt();
+
+		QJsonObject globalOrientation{ {"min", 0}, {"max", 0}, {"value", 0} };
+		QJsonArray positionData;
+
+		for (int i = 0; i < length; ++i)
+		{
+			QJsonObject panel{ {"panelId", i}, {"x", i * 10}, {"y", 0}, {"o", 0}, {"shapeType", 0} };
+			positionData.append(panel);
+		}
+
+		QJsonObject layout{ {"numPanels", length}, {"sideLength", 0}, {"positionData", positionData} };
+		jsonPanelLayout["globalOrientation"] = globalOrientation;
+		jsonPanelLayout["layout"] = layout;
+	}
+	else if (jsonAllPanelInfo.contains(API_PANELLAYOUT))
+	{
+		jsonPanelLayout = jsonAllPanelInfo[API_PANELLAYOUT].toObject();
 	}
 	else
 	{
-		QJsonObject jsonAllPanelInfo = response.getBody().object();
+		this->setInError("Missing panel layout information");
+		return false;
+	}
 
-		QString deviceName = jsonAllPanelInfo[DEV_DATA_NAME].toString();
-		_deviceModel = jsonAllPanelInfo[DEV_DATA_MODEL].toString();
-		QString deviceManufacturer = jsonAllPanelInfo[DEV_DATA_MANUFACTURER].toString();
-		_deviceFirmwareVersion = jsonAllPanelInfo[DEV_DATA_FIRMWAREVERSION].toString();
+	// Extract global orientation
+	if (!jsonPanelLayout.contains(PANEL_GLOBALORIENTATION))
+	{
+		this->setInError("Global orientation data missing");
+		return false;
+	}
 
-		Debug(_log, "Name           : %s", QSTRING_CSTR(deviceName));
-		Debug(_log, "Model          : %s", QSTRING_CSTR(_deviceModel));
-		Debug(_log, "Manufacturer   : %s", QSTRING_CSTR(deviceManufacturer));
-		Debug(_log, "FirmwareVersion: %s", QSTRING_CSTR(_deviceFirmwareVersion));
+	QJsonObject globalOrientation = jsonPanelLayout[PANEL_GLOBALORIENTATION].toObject();
+	int orientation = globalOrientation[PANEL_GLOBALORIENTATION_VALUE].toInt();
+	int degreesToRotate = (static_cast<int>(round(orientation / ROTATION_STEPS_DEGREE) * ROTATION_STEPS_DEGREE) + 360) % 360;
+	bool isRotated = (degreesToRotate > 0);
+	double radians = (degreesToRotate * std::acos(-1)) / -180.0;
 
-		// Get panel details from /panelLayout/layout
-		QJsonObject jsonPanelLayout = jsonAllPanelInfo[API_PANELLAYOUT].toObject();
+	DebugIf(verbose, _log, "globalOrientation: %d, degreesToRotate: %d, radians: %0.2f", orientation, degreesToRotate, radians);
 
-		const QJsonObject globalOrientation = jsonPanelLayout[PANEL_GLOBALORIENTATION].toObject();
-		int orientation = globalOrientation[PANEL_GLOBALORIENTATION_VALUE].toInt();
+	// Extract panel layout
+	if (!jsonPanelLayout.contains(PANEL_LAYOUT))
+	{
+		this->setInError("Panel layout data missing");
+		return false;
+	}
 
-		int degreesToRotate {orientation};
-		bool isRotated {false};
-		if (degreesToRotate > 0)
+	QJsonObject jsonLayout = jsonPanelLayout[PANEL_LAYOUT].toObject();
+	_panelLedCount = getHwLedCount(jsonLayout);
+	_devConfig["hardwareLedCount"] = _panelLedCount;
+
+	int panelNum = jsonLayout[PANEL_NUM].toInt();
+	const QJsonArray positionData = jsonLayout[PANEL_POSITIONDATA].toArray();
+
+	std::map<int, std::map<int, std::vector<int>>> panelMap;
+	_panelIds.clear();  // Ensure previous data is cleared
+
+	for (const QJsonValue& value : positionData)
+	{
+		QJsonObject panelObj = value.toObject();
+		int panelId = panelObj[PANEL_ID].toInt();
+		int panelShapeType = panelObj[PANEL_SHAPE_TYPE].toInt();
+		int posX = panelObj[PANEL_POS_X].toInt();
+		int posY = panelObj[PANEL_POS_Y].toInt();
+
+		int panelX = isRotated ? static_cast<int>(round(posX * cos(radians) - posY * sin(radians))) : posX;
+		int panelY = isRotated ? static_cast<int>(round(posX * sin(radians) + posY * cos(radians))) : posY;
+
+		if (hasLEDs(static_cast<SHAPETYPES>(panelShapeType)))
 		{
-			isRotated = true;
-			int degreeRounded = static_cast<int>(round(degreesToRotate / ROTATION_STEPS_DEGREE) * ROTATION_STEPS_DEGREE);
-			degreesToRotate = (degreeRounded +360) % 360;
-		}
-
-		//Nanoleaf orientation is counter-clockwise
-		degreesToRotate *= -1;
-
-		double radians = (degreesToRotate * std::acos(-1)) / 180;
-		DebugIf(verbose, _log, "globalOrientation: %d, degreesToRotate: %d, radians: %0.2f", orientation, degreesToRotate, radians);
-
-		QJsonObject jsonLayout = jsonPanelLayout[PANEL_LAYOUT].toObject();
-
-		_panelLedCount = getHwLedCount(jsonLayout);
-		_devConfig["hardwareLedCount"] = _panelLedCount;
-
-		int panelNum = jsonLayout[PANEL_NUM].toInt();
-		const QJsonArray positionData = jsonLayout[PANEL_POSITIONDATA].toArray();
-
-		std::map<int, std::map<int, std::vector<int>>> panelMap;
-
-		// Loop over all children.
-		for (const QJsonValue& value : positionData)
-		{
-			QJsonObject panelObj = value.toObject();
-
-			int panelId = panelObj[PANEL_ID].toInt();
-			int panelshapeType = panelObj[PANEL_SHAPE_TYPE].toInt();
-			int posX = panelObj[PANEL_POS_X].toInt();
-			int posY = panelObj[PANEL_POS_Y].toInt();
-
-			int panelX;
-			int panelY;
-			if (isRotated)
-			{
-				panelX = static_cast<int>(round(posX * cos(radians) - posY * sin(radians)));
-				panelY = static_cast<int>(round(posX * sin(radians) + posY * cos(radians)));
-			}
-			else
-			{
-				panelX = posX;
-				panelY = posY;
-			}
-
-			if (hasLEDs(static_cast<SHAPETYPES>(panelshapeType)))
-			{
-				panelMap[panelY][panelX];
-				panelMap[panelY][panelX].push_back(panelId);
-				if (panelMap[panelY][panelX].size() > 1) {
-					DebugIf(verbose, _log, "Use  Panel [%d] (%d,%d) - Type: [%d] (Ovarlapping %d other Panels)", panelId, panelX, panelY, panelshapeType, panelMap[panelY][panelX].size() - 1);
-				} else {
-					DebugIf(verbose, _log, "Use  Panel [%d] (%d,%d) - Type: [%d]", panelId, panelX, panelY, panelshapeType);
-				}
-
-			}
-			else
-			{
-				DebugIf(verbose, _log, "Skip Panel [%d] (%d,%d) - Type: [%d]", panelId, panelX, panelY, panelshapeType);
-			}
-		}
-
-		// Travers panels top down
-		_panelIds.clear();
-		for (auto posY = panelMap.crbegin(); posY != panelMap.crend(); ++posY)
-		{
-			// Sort panels left to right
-			if (_leftRight)
-			{
-				for (auto posX = posY->second.cbegin(); posX != posY->second.cend(); ++posX)
-				{
-					for (auto ledId = posX->second.cbegin(); ledId != posX->second.cend(); ++ledId)
-					{
-						DebugIf(verbose, _log, "panelMap[%d][%d]=%d", posY->first, posX->first, ledId);
-
-						if (_topDown)
-						{
-							_panelIds.push_back(*ledId);
-						}
-						else
-						{
-							_panelIds.push_front(*ledId);
-						}
-					}
-				}
-			}
-			else
-			{
-				// Sort panels right to left
-				for (auto posX = posY->second.crbegin(); posX != posY->second.crend(); ++posX)
-				{
-					for (auto ledId = posX->second.cbegin(); ledId != posX->second.cend(); ++ledId)
-					{
-						DebugIf(verbose, _log, "panelMap[%d][%d]=%d", posY->first, posX->first, ledId);
-
-						if (_topDown)
-						{
-							_panelIds.push_back(*ledId);
-						}
-						else
-						{
-							_panelIds.push_front(*ledId);
-						}
-					}
-				}
-			}
-		}
-
-		Debug(_log, "PanelsNum      : %d", panelNum);
-		Debug(_log, "PanelLedCount  : %d", _panelLedCount);
-		Debug(_log, "Sort Top>Down  : %d", _topDown);
-		Debug(_log, "Sort Left>Right: %d", _leftRight);
-
-		DebugIf(verbose, _log, "PanelMap size  : %d", panelMap.size());
-		DebugIf(verbose, _log, "PanelIds count : %d", _panelIds.size());
-
-		// Check. if enough panels were found.
-		int configuredLedCount = this->getLedCount();
-		if (_panelLedCount < configuredLedCount)
-		{
-			QString errorReason = QString("Not enough panels [%1] for configured LEDs [%2] found!")
-				.arg(_panelLedCount)
-				.arg(configuredLedCount);
-			this->setInError(errorReason, false);
-			isInitOK = false;
+			panelMap[panelY][panelX].push_back(panelId);
+			DebugIf(verbose, _log, "Use Panel [%d] (%d,%d) - Type: [%d] %s", panelId, panelX, panelY, panelShapeType,
+				panelMap[panelY][panelX].size() > 1 ? "(Overlapping)" : "");
 		}
 		else
 		{
-			if (_panelLedCount > this->getLedCount())
-			{
-				Info(_log, "%s: More panels [%d] than configured LEDs [%d].", QSTRING_CSTR(this->getActiveDeviceType()), _panelLedCount, configuredLedCount);
-			}
-
-			//Check that panel count matches working list created for processing
-			if (_panelLedCount != _panelIds.size())
-			{
-				QString errorReason = QString("Number of available panels [%1] do not match panel-ID look-up list [%2]!")
-					.arg(_panelLedCount)
-					.arg(_panelIds.size());
-				this->setInError(errorReason, false);
-				isInitOK = false;
-			}
-
+			DebugIf(verbose, _log, "Skip Panel [%d] (%d,%d) - Type: [%d]", panelId, panelX, panelY, panelShapeType);
 		}
 	}
+
+	// Traverse panels top-down
+	for (auto posY = panelMap.crbegin(); posY != panelMap.crend(); ++posY)
+	{
+		if (_leftRight)
+		{
+			for (auto& posX : posY->second)
+			{
+				for (int ledId : posX.second)
+				{
+					_topDown ? _panelIds.push_back(ledId) : _panelIds.push_front(ledId);
+				}
+			}
+		}
+		else
+		{
+			for (auto posX = posY->second.crbegin(); posX != posY->second.crend(); ++posX)
+			{
+				for (int ledId : posX->second)
+				{
+					_topDown ? _panelIds.push_back(ledId) : _panelIds.push_front(ledId);
+				}
+			}
+		}
+	}
+
+	Debug(_log, "PanelsNum      : %d", panelNum);
+	Debug(_log, "PanelLedCount  : %d", _panelLedCount);
+	Debug(_log, "Sort Top>Down  : %d", _topDown);
+	Debug(_log, "Sort Left>Right: %d", _leftRight);
+	DebugIf(verbose, _log, "PanelIds count : %d", _panelIds.size());
+
+	// Validate panel count
+	int configuredLedCount = this->getLedCount();
+	if (_panelLedCount < configuredLedCount)
+	{
+		this->setInError(QString("Not enough panels [%1] for configured LEDs [%2]!").arg(_panelLedCount).arg(configuredLedCount), false);
+		return false;
+	}
+
+	if (_panelLedCount > configuredLedCount)
+	{
+		Info(_log, "%s: More panels [%d] than configured LEDs [%d].", QSTRING_CSTR(this->getActiveDeviceType()), _panelLedCount, configuredLedCount);
+	}
+
+	if (_panelLedCount != _panelIds.size())
+	{
+		this->setInError(QString("Number of available panels [%1] does not match panel-ID look-up list [%2]!").arg(_panelLedCount).arg(_panelIds.size()), false);
+		return false;
+	}
+
 	return isInitOK;
 }
+
 
 bool LedDeviceNanoleaf::openRestAPI()
 {
