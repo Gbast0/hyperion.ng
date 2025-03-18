@@ -15,8 +15,9 @@ on:
 
 jobs:
 
+  # GitHub Push/Pull Request (Release only on tagged commits)
   github_build:
-    name: Qt ${{ matrix.qt_version }} Build ${{ matrix.qt_version == '6' && '(Testing)' || '' }}
+    name: Qt ${{ matrix.qt_version }} Build ${{ matrix.qt_version == '6' && '(Testing))' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,61 +30,20 @@ jobs:
       pull_request_number: ${{ github.event.pull_request.number }}
       publish: ${{ startsWith(github.event.ref, 'refs/tags') && matrix.qt_version == '5' }}
 
-  save_artifacts_to_repo:
-    name: 💾 Save Build to Repository
-    needs: [github_build]
+  # Build DEB/RPM Packages for APT/DNF Repository (runs only on tagged commits)
+  repo_build:
+    name: 🚀 Let Hyperion build its own repository (APT/DNF)
+    if: startsWith(github.event.ref, 'refs/tags')
+    needs: [ github_build ]
     runs-on: ubuntu-latest
     steps:
-      - name: ⬇️ Checkout Repository
-        uses: actions/checkout@v4
+      - name: 📲 Dispatch APT/DNF build
+        if: ${{ env.SECRET_HYPERION_BOT_TOKEN != null }}
+        uses: peter-evans/repository-dispatch@v3.0.0
         with:
-          fetch-depth: 0  # Fetch full history for branch creation
-
-      - name: 🛠 Prepare Build Output
-        run: |
-          mkdir -p build_artifacts
-          cp -r build/* build_artifacts/ || echo "No files copied"
-          ls -lah build_artifacts/
-
-      - name: 📤 Commit & Push Build Files
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Checkout or create the 'build-artifacts' branch
-          git checkout -B build-artifacts
-          
-          # Add & commit changes
-          git add build_artifacts/
-          git commit -m "🚀 New build artifacts - $(date +'%Y-%m-%d %H:%M:%S')"
-          git push origin build-artifacts --force
-
-  github_publish:
-    name: 🚀 Publish GitHub Releases
-    if: ${{ inputs.qt_version == '5' && inputs.publish }}
-    needs: [github_build, save_artifacts_to_repo]
-    runs-on: ubuntu-latest
-    steps:
-      - name: ⬇ Checkout
-        uses: actions/checkout@v4
-
-      - name: 🔧 Prepare
-        run: |
-          echo "TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
-          echo "VERSION=$(tr -d '\n' < .version)" >> $GITHUB_ENV
-
-      - name: 💾 Artifact download
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifact-*
-          path: all-artifacts
-
-      - name: 📦 Upload
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Hyperion ${{ env.VERSION }}
-          tag_name: ${{ env.TAG }}
-          files: "all-artifacts/**"
-          draft: true
+          repository: hyperion-project/hyperion.releases-ci
+          token: ${{ secrets.HYPERION_BOT_TOKEN }}
+          event-type: releases_repo_build
+          client-payload: '{ "head_sha": "${{ github.sha }}", "repo_checkout": "hyperion-project/hyperion.ng" }'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SECRET_HYPERION_BOT_TOKEN: ${{ secrets.HYPERION_BOT_TOKEN }}
